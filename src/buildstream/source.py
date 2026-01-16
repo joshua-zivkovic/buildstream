@@ -38,15 +38,11 @@ any Source.
   to provide additional source provenance related metadata which will later
   be reported in :class:`.SourceInfo` objects.
 
-  The ``provenance`` dictionary supports the following fields:
+  The ``provenance`` dictionary itself does not have any specific required keys.
 
-  * Homepage
-
-    The ``homepage`` attribute can be used to specify the project homepage URL
-
-  * Issue Tracker
-
-    The ``issue-tracker`` attribute can be used to specify the project's issue tracking URL
+  Any attribute used in the ``provenance`` dictionary of a source must be
+  defined in the project.conf using the ``source-provenance-fields`` dictionary
+  to define the attribute and its significance.
 
   *Since: 2.5*
 
@@ -371,16 +367,26 @@ Class Reference
 
 import os
 from contextlib import contextmanager
-from typing import Iterable, Iterator, Optional, Tuple, Dict, Any, Set, TYPE_CHECKING, Union
+from typing import (
+    Iterable,
+    Iterator,
+    Optional,
+    Tuple,
+    Dict,
+    Any,
+    Set,
+    TYPE_CHECKING,
+    Union,
+)
 from dataclasses import dataclass
 
 from . import _yaml, utils
-from .node import MappingNode
+from .node import MappingNode, ScalarNode
 from .plugin import Plugin
 from .sourcemirror import SourceMirror
-from .types import SourceRef, CoreWarnings, FastEnum, _SourceProvenance
-from ._exceptions import BstError, ImplError, PluginError
-from .exceptions import ErrorDomain
+from .types import SourceRef, CoreWarnings, FastEnum
+from ._exceptions import BstError, ImplError, PluginError, LoadError
+from .exceptions import ErrorDomain, LoadErrorReason
 from ._loader.metasource import MetaSource
 from ._projectrefs import ProjectRefStorage
 from ._cachekey import generate_key
@@ -395,6 +401,8 @@ if TYPE_CHECKING:
     from ._project import Project
 
     # pylint: enable=cyclic-import
+
+SourceProvenance = MappingNode
 
 
 class SourceError(BstError):
@@ -555,6 +563,7 @@ class SourceInfo:
         url: str,
         homepage: Optional[str],
         issue_tracker: Optional[str],
+        provenance: Optional[SourceProvenance],
         medium: Union[SourceInfoMedium, str],
         version_type: Union[SourceVersionType, str],
         version: str,
@@ -579,7 +588,12 @@ class SourceInfo:
 
         self.issue_tracker: Optional[str] = issue_tracker
         """
-        The project issue tracking URL
+        The issue tracker for the project
+        """
+
+        self.provenance = provenance
+        """
+        The optional YAML node with source provenance attributes
         """
 
         self.medium: Union[SourceInfoMedium, str] = medium
@@ -642,10 +656,14 @@ class SourceInfo:
             "url": self.url,
         }
 
-        if self.homepage is not None:
-            version_info["homepage"] = self.homepage
-        if self.issue_tracker is not None:
-            version_info["issue-tracker"] = self.issue_tracker
+        if self.provenance is not None:
+            # need to keep homepage/issue-tracker [also] at the top-level for backward compat
+            if (homepage := self.provenance.get_str("homepage", None)) is not None:
+                version_info["homepage"] = homepage
+            if (issue_tracker := self.provenance.get_str("issue-tracker", None)) is not None:
+                version_info["issue-tracker"] = issue_tracker
+
+            version_info["provenance"] = self.provenance.strip_node_info()
 
         version_info["medium"] = medium_str
         version_info["version-type"] = version_type_str
@@ -825,8 +843,8 @@ class Source(Plugin):
         self._directory = meta.directory  # Staging relative directory
         self.__variables = variables  # The variables used to resolve the source's config
         self.__provenance: Optional[
-            _SourceProvenance
-        ] = meta.provenance  # The _SourceProvenance for general user provided SourceInfo
+            SourceProvenance
+        ] = meta.provenance  # The source provenance for general user provided SourceInfo
 
         self.__key = None  # Cache key for source
 
@@ -1393,23 +1411,41 @@ class Source(Plugin):
 
         *Since: 2.5*
         """
-        homepage = None
-        issue_tracker = None
+        project = self._get_project()
 
+        provenance: SourceProvenance | None
         if provenance_node is not None:
-            provenance: Optional[_SourceProvenance] = _SourceProvenance.new_from_node(provenance_node)
+            # Ensure provenance node keys are valid and values are all strings
+            try:
+                provenance_node.validate_keys(project.source_provenance_fields.keys())
+            except LoadError as E:
+                raise LoadError(
+                    "Specified source attribute not defined in project config\n {}".format(E),
+                    LoadErrorReason.UNDEFINED_SOURCE_PROVENANCE_ATTRIBUTE,
+                )
+
+            # Make sure everything is a string
+            for value in provenance_node.values():
+                if not isinstance(value, ScalarNode):
+                    raise LoadError(f"{value} could not be parsed as a string", LoadErrorReason.INVALID_DATA)
+
+            provenance = provenance_node
         else:
             provenance = self.__provenance
 
+        homepage = None
+        issue_tracker = None
+
         if provenance is not None:
-            homepage = provenance.homepage
-            issue_tracker = provenance.issue_tracker
+            homepage = provenance.get_str("homepage", None)
+            issue_tracker = provenance.get_str("issue-tracker", None)
 
         return SourceInfo(
             self.get_kind(),
             url,
             homepage,
             issue_tracker,
+            provenance,
             medium,
             version_type,
             version,

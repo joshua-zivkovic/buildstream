@@ -125,6 +125,8 @@ class Project:
         self.sandbox: Optional[MappingNode] = None
         self.splits: Optional[MappingNode] = None
 
+        self.source_provenance_fields: Optional[MappingNode] = None  # Source provenance fields and their description
+
         #
         # Private members
         #
@@ -726,6 +728,7 @@ class Project:
                 "sources",
                 "source-caches",
                 "junctions",
+                "source-provenance-fields",
                 "(@)",
                 "(?)",
             ]
@@ -1005,6 +1008,13 @@ class Project:
                 mount = _HostMount(path, host_path, optional)
 
             self._shell_host_files.append(mount)
+
+        # We don't want to combine the source provenance fields that a project defines with the defaults
+        # If the project config defines source-provenance-fields use that, otherwise fall back to the defaults
+        # This is purely to maintain backwards compatibility with homepage and issue-tracker being available
+        self.source_provenance_fields = project_conf_second_pass.get_mapping(
+            "source-provenance-fields", None
+        ) or config.get_mapping("source-provenance-fields")
 
     # _load_pass():
     #

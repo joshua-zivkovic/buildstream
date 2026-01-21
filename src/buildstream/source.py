@@ -367,17 +367,7 @@ Class Reference
 
 import os
 from contextlib import contextmanager
-from typing import (
-    Iterable,
-    Iterator,
-    Optional,
-    Tuple,
-    Dict,
-    Any,
-    Set,
-    TYPE_CHECKING,
-    Union,
-)
+from typing import Iterable, Iterator, Optional, Tuple, Dict, Any, Set, TYPE_CHECKING, Union
 from dataclasses import dataclass
 
 from . import _yaml, utils
@@ -387,6 +377,7 @@ from .sourcemirror import SourceMirror
 from .types import SourceRef, CoreWarnings, FastEnum
 from ._exceptions import BstError, ImplError, PluginError, LoadError
 from .exceptions import ErrorDomain, LoadErrorReason
+from ._loader import Symbol
 from ._loader.metasource import MetaSource
 from ._projectrefs import ProjectRefStorage
 from ._cachekey import generate_key
@@ -945,7 +936,16 @@ class Source(Plugin):
         """
         raise ImplError("Source plugin '{}' does not implement set_ref()".format(self.get_kind()))
 
-    def track(self, *, previous_sources_dir: Optional[str] = None) -> SourceRef:
+    def load_source_provenance(self, node: MappingNode) -> None:
+        pass
+
+    def get_source_provenance(self) -> SourceProvenance:
+        return None
+
+    def set_source_provenance(self, source_provenance: SourceProvenance):
+        pass
+
+    def track(self, *, previous_sources_dir: Optional[str] = None) -> SourceRef | tuple[SourceRef, SourceProvenance]:
         """Resolve a new ref from the plugin's track option
 
         Args:
@@ -970,7 +970,7 @@ class Source(Plugin):
         Working with the :ref:`source ref is discussed here <core_source_ref>`.
         """
         # Allow a non implementation
-        return None
+        return None, None
 
     def fetch(self, *, previous_sources_dir: Optional[str] = None) -> None:
         """Fetch remote sources and mirror them locally, ensuring at least
@@ -1808,18 +1808,77 @@ class Source(Plugin):
 
         return True
 
+    def _set_source_provenance(self, source_provenance):
+        context = self._get_context()
+        project = self._get_project()
+        toplevel = context.get_toplevel_project()
+        toplevel_refs = self._project_refs(toplevel)
+        provenance = self._get_provenance()
+
+        element_name = self.__element_name
+        element_idx = self.__element_index
+
+        node = {}
+        if toplevel.ref_storage == ProjectRefStorage.PROJECT_REFS:
+            node = toplevel_refs.lookup_ref(project.name, element_name, element_idx, write=True)
+
+        if project is toplevel and not node:
+            node = provenance._node
+        self.warn(f"{node}")
+        self.warn(f"Providing provenance: {source_provenance}")
+        self.set_source_provenance(source_provenance, node)
+
     # Wrapper for track()
     #
     # Args:
     #   previous_sources_dir (str): directory where previous sources are staged
     #
     def _track(self, previous_sources_dir: Optional[str] = None) -> SourceRef:
+        def verify_provenance_attributes(provenance: SourceProvenance):
+            if type(provenance) is list:
+                # produce a list of unique attrs
+                unique_entries = {attr: "" for single_provenance in provenance for attr in single_provenance.keys()}
+                used_attrs = unique_entries.keys()
+            else:
+                used_attrs = provenance.keys()
+
+            project = self._get_project()
+            defined_provenance_fields = (
+                project._project_conf.get_mapping("source-provenance-fields", None) or project.source_provenance_fields
+            )
+            undefined_attributes = list(set(used_attrs) - set(defined_provenance_fields.keys()))
+
+            if len(undefined_attributes) > 0:
+                self.warn(f"Required source attributes not defined in project config: {undefined_attributes}")
+
+        def provenance_diff(old: list[dict] | dict, new: list[dict] | dict):
+            # old and new can only be of the same type unless the plugin is malformed
+            if type(old) is list:
+                diffs = []
+                for o, n in zip(old, new):
+                    if len((diff := set(o.keys()).difference(set(n.keys())))) == 0:
+                        diffs.append(diff)
+
+                return [print(set(o.keys()).difference(set(n.keys()))) for o, n in zip(old, new)]
+            else:
+                return set(old.keys()).difference(set(new.keys()))
+
         if self.BST_REQUIRES_PREVIOUS_SOURCES_TRACK:
-            new_ref = self.__do_track(previous_sources_dir=previous_sources_dir)
+            r = self.__do_track(previous_sources_dir=previous_sources_dir)
         else:
-            new_ref = self.__do_track()
+            r = self.__do_track()
+
+        if type(r) is tuple:
+            new_ref, source_provenance = r
+        else:
+            new_ref = r
+            source_provenance = None
 
         current_ref = self.get_ref()  # pylint: disable=assignment-from-no-return
+
+        # in the case of multi-source plugins, set_ref might update the provenance with the new content,
+        # designed to use ref, so grab the old content first
+        current_provenance: list[MappingNode] = self.get_source_provenance()
 
         if new_ref is None:
             # No tracking, keep current ref
@@ -1832,6 +1891,15 @@ class Source(Plugin):
             self._set_ref(new_ref, save=False)
 
         self._generate_key()
+
+        if source_provenance is not None:
+            verify_provenance_attributes(source_provenance)
+
+        if current_provenance != source_provenance:
+            provenance_diff = provenance_diff(current_provenance, source_provenance)
+            self.info(f"Updated source provenance content: {provenance_diff}")
+
+            self._set_source_provenance(source_provenance)
 
         return new_ref
 
@@ -2061,14 +2129,14 @@ class Source(Plugin):
         for mirror in reversed(project.get_alias_uris(alias, first_pass=self.__first_pass, tracking=True)):
             new_source = self.__clone_for_uri(mirror)
             try:
-                ref = new_source.track(**kwargs)  # pylint: disable=assignment-from-none
+                r = new_source.track(**kwargs)  # pylint: disable=assignment-from-none
             # FIXME: Need to consider temporary vs. permanent failures,
             #        and how this works with retries.
             except BstError as e:
                 last_error = e
                 continue
 
-            return ref
+            return r
 
         raise last_error
 

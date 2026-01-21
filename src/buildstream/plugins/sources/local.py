@@ -93,6 +93,15 @@ class LocalSource(Source):
     def set_ref(self, ref, node):
         pass  # pragma: nocover
 
+    def load_source_provenance(self, node):
+        pass
+
+    def get_source_provenance(self):
+        return None
+
+    def set_source_provenance(self, source_provenance, node):
+        pass
+
     def fetch(self):  # pylint: disable=arguments-differ
         # Nothing to do here for a local source
         pass  # pragma: nocover

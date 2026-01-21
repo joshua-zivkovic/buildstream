@@ -269,6 +269,7 @@ class DownloadableFileSource(Source):
     def configure(self, node):
         self.original_url = node.get_str("url")
         self.ref = node.get_str("ref", None)
+        self.source_provenance = node.get_mapping("provenance", None)
 
         extra_data = {}
         self.url = self.translate_url(self.original_url, extra_data=extra_data)
@@ -310,6 +311,15 @@ class DownloadableFileSource(Source):
     def set_ref(self, ref, node):
         node["ref"] = self.ref = ref
 
+    def load_source_provenance(self, node):
+        self.source_provenance = node.get_str("provenance", None)
+
+    def get_source_provenance(self):
+        return self.source_provenance
+
+    def set_source_provenance(self, source_provenance, node):
+        node["provenance"] = self.source_provenance = source_provenance
+
     def track(self):  # pylint: disable=arguments-differ
         # there is no 'track' field in the source to determine what/whether
         # or not to update refs, because tracking a ref is always a conscious
@@ -325,7 +335,7 @@ class DownloadableFileSource(Source):
             )
             self.warn("Potential man-in-the-middle attack!", detail=detail)
 
-        return new_ref
+        return new_ref, None
 
     def fetch(self):  # pylint: disable=arguments-differ
 
